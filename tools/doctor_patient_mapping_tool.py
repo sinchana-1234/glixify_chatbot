@@ -201,7 +201,10 @@ class DoctorPatientMappingTool(BaseTool):
                     # If doctor_name provided, find the doctor_id
                     if doctor_name and not doctor_id:
                         doctors = db_manager.get_users()
-                        matching_doctors = [d for d in doctors if doctor_name.lower() in d.name.lower()]
+                        matching_doctors = [
+                            d for d in doctors
+                            if doctor_name.lower() in f"{d.first_name or ''} {d.last_name or ''}".strip().lower()
+                        ]
                         
                         if not matching_doctors:
                             return json.dumps({
@@ -212,7 +215,10 @@ class DoctorPatientMappingTool(BaseTool):
                         if len(matching_doctors) > 1:
                             return json.dumps({
                                 "error": f"Multiple doctors found with name containing '{doctor_name}'",
-                                "matching_doctors": [{"id": d.id, "name": d.name, "email": d.email} for d in matching_doctors],
+                                "matching_doctors": [
+                                    {"id": d.id, "name": f"{d.first_name or ''} {d.last_name or ''}".strip(), "email": d.email}
+                                    for d in matching_doctors
+                                ],
                                 "suggestion": "Please specify exact doctor ID or more specific name"
                             }, indent=2)
                         
@@ -252,10 +258,12 @@ class DoctorPatientMappingTool(BaseTool):
                             }
                             detailed_patients.append(patient_info)
                     
+                    doctor_full_name = f"{doctor_info.first_name or ''} {doctor_info.last_name or ''}".strip()
+
                     return json.dumps({
                         "doctor": {
                             "doctor_id": target_doctor_id,
-                            "doctor_name": doctor_info.name,
+                            "doctor_name": doctor_full_name,
                             "doctor_email": doctor_info.email,
                             "mobile_number": doctor_info.mobile_number,
                             "qualification": getattr(doctor_info, 'qualification', None),
@@ -263,7 +271,7 @@ class DoctorPatientMappingTool(BaseTool):
                         },
                         "total_patients": len(detailed_patients),
                         "patients": detailed_patients,
-                        "message": f"Doctor {doctor_info.name} has {len(detailed_patients)} assigned patients"
+                        "message": f"Doctor {doctor_full_name} has {len(detailed_patients)} assigned patients"
                     }, indent=2)
                 
                 else:
