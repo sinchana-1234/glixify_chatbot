@@ -285,9 +285,10 @@ class MedicalLangChainAgent:
    - NEVER use search_hospital_documents for patient-specific profile queries
 
 4. **DOCTOR QUERIES - SPECIAL HANDLING**:
-   - For "my doctor", "who is my doctor", "doctor details" → ALWAYS use get_doctor_patient_info
-   - For "my DHA details", "DHA information" → ALWAYS use get_doctor_patient_info
-   - For staff: "patients for doctor X" → use get_doctor_patient_info
+   - For "my doctor", "who is my doctor", "doctor details" → ALWAYS use get_doctor_patient_info with query_type="my_doctor" (patient role)
+   - For "my DHA details", "DHA information" → ALWAYS use get_doctor_patient_info with query_type="my_dha" (patient role)
+   - For staff: "list my patients", "my patients", "who are my patients" → use get_doctor_patient_info with query_type="my_patients" (no doctor_id needed — uses the logged-in staff member automatically)
+   - For staff: "patients for doctor X" / "patients assigned to doctor 1212" → use get_doctor_patient_info with query_type="doctor_patients", doctor_id or doctor_name
    - NEVER use search_hospital_documents for doctor-patient relationship queries
 
 5. **DEVICE QUERIES - SPECIAL HANDLING**:

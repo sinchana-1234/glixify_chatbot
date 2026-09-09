@@ -17,7 +17,7 @@ class DoctorPatientMappingTool(BaseTool):
     description: str = """Get doctor-patient mapping information with role-based access control.
     
     Parameters:
-    - query_type (str): Type of query - "my_doctor", "my_dha", "patient_primary_doctor", "patient_dha", "doctor_patients"
+    - query_type (str): Type of query - "my_doctor", "my_dha", "patient_primary_doctor", "patient_dha", "doctor_patients", "my_patients"
     - patient_id (int): Patient ID (optional for patient role, required for staff queries)
     - doctor_id (int): Doctor ID (optional, for specific doctor queries)
     - doctor_name (str): Doctor name (optional, alternative to doctor_id)
@@ -25,6 +25,7 @@ class DoctorPatientMappingTool(BaseTool):
     Use this tool for queries like:
     - "My doctor details" → query_type="my_doctor" (patient role)
     - "My DHA details" → query_type="my_dha" (patient role)
+    - "List my patients" / "My patients" / "Who are my patients" → query_type="my_patients" (staff role — no doctor_id needed, uses the logged-in staff member's own ID)
     - "Primary doctor for patient 123" → query_type="patient_primary_doctor", patient_id=123 (staff role)
     - "DHA details for patient 123" → query_type="patient_dha", patient_id=123 (staff role)
     - "List patients assigned to doctor 1212" → query_type="doctor_patients", doctor_id=1212 (staff role)
@@ -70,8 +71,8 @@ class DoctorPatientMappingTool(BaseTool):
                 # Medical staff can query any patient information
                 if query_type in ['my_doctor', 'my_dha']:
                     return json.dumps({
-                        "error": "Invalid query type for medical staff. Use 'patient_primary_doctor', 'patient_dha', or 'doctor_patients'.",
-                        "allowed_queries": ["patient_primary_doctor", "patient_dha", "doctor_patients"]
+                        "error": "Invalid query type for medical staff. Use 'patient_primary_doctor', 'patient_dha', 'doctor_patients', or 'my_patients'.",
+                        "allowed_queries": ["patient_primary_doctor", "patient_dha", "doctor_patients", "my_patients"]
                     }, indent=2)
                 
                 # For staff queries, patient_id or doctor_id must be provided
@@ -84,6 +85,12 @@ class DoctorPatientMappingTool(BaseTool):
                     return json.dumps({
                         "error": "doctor_id or doctor_name is required for doctor patient queries"
                     }, indent=2)
+
+                # "my_patients" is self-referencing: resolve doctor_id to the logged-in
+                # staff member's own user_id, exactly like "my_doctor"/"my_dha" do for patients.
+                if query_type == 'my_patients':
+                    doctor_id = user_context.get('user_id')
+                    query_type = 'doctor_patients'
             
             with DatabaseManager() as db_manager:
                 if query_type == "my_doctor" or query_type == "patient_primary_doctor":
