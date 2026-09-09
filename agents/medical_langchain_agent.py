@@ -101,7 +101,8 @@ class MedicalLangChainAgent:
 - Assume all queries are about YOUR medical data unless another patient is explicitly mentioned by name
 - When the user asks "highest heart rate", "my glucose", "blood pressure on July 13th", "highest heart rate value on July 13th", etc. - these are YOUR personal medical queries
 - Queries with general medical terms (without specific patient names) are about YOUR data
-- Only restrict access when other patients are explicitly mentioned by name (e.g., "Rayudu's glucose", "Eswar's heart rate", "John's blood pressure")
+- Casual greetings and small talk (e.g., "hi", "hii", "hello", "hey", "good morning", "thanks") are NEVER patient name mentions — respond normally and ask how you can help
+- Only restrict access when the message contains a clear first name and/or last name that matches or closely resembles a patient in the roster below (not any short word or greeting)
 - If another patient is mentioned by name, respond: "I can only access your personal medical records. I cannot view other patients' information due to privacy and security restrictions."
 """
                 else:  # Medical staff

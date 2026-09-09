@@ -1,25 +1,78 @@
 #!/usr/bin/env python3
 """
-Database Token Authentication and Authorization utilities for Revival Medical System
-Uses tokens stored in the database instead of JWT
+Cognito Token Authentication and Authorization utilities for Revival Medical System
+Verifies Cognito ID tokens directly (JWKS signature check) instead of a DB-stored token.
 """
 
 import os
+import time
 import logging
-from datetime import datetime
 from typing import Optional, Dict, Any
-from fastapi import HTTPException, Depends, Request, Header
+from fastapi import HTTPException, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
+from jose import jwt, JWTError
+import requests
 
-from dal.database import DatabaseManager
-from dal.models.users import Users
 from dal.models.role import Role
 
 logger = logging.getLogger(__name__)
 
 # Security scheme
 security = HTTPBearer()
+
+# ─────────────────────────────────────────────
+# Cognito JWT verification
+# ─────────────────────────────────────────────
+COGNITO_REGION = os.getenv("COGNITO_REGION")
+COGNITO_USER_POOL_ID = os.getenv("COGNITO_USER_POOL_ID")
+COGNITO_APP_CLIENT_ID = os.getenv("COGNITO_APP_CLIENT_ID")
+COGNITO_ISSUER = f"https://cognito-idp.{COGNITO_REGION}.amazonaws.com/{COGNITO_USER_POOL_ID}"
+COGNITO_JWKS_URL = f"{COGNITO_ISSUER}/.well-known/jwks.json"
+
+_jwks_cache: Optional[Dict[str, Any]] = None
+_jwks_cache_time: float = 0
+_JWKS_CACHE_TTL = 3600  # refetch keys at most once an hour
+
+def _get_jwks() -> Dict[str, Any]:
+    """Fetch Cognito's public signing keys, cached for _JWKS_CACHE_TTL seconds."""
+    global _jwks_cache, _jwks_cache_time
+    now = time.time()
+    if _jwks_cache is None or (now - _jwks_cache_time) > _JWKS_CACHE_TTL:
+        resp = requests.get(COGNITO_JWKS_URL, timeout=10)
+        resp.raise_for_status()
+        _jwks_cache = resp.json()
+        _jwks_cache_time = now
+    return _jwks_cache
+
+def verify_cognito_token(token: str) -> Dict[str, Any]:
+    """
+    Verify a Cognito ID token's signature, issuer, audience and expiry,
+    and return its decoded claims. Raises HTTPException(401) on any failure.
+    """
+    try:
+        jwks = _get_jwks()
+        header = jwt.get_unverified_header(token)
+        key = next((k for k in jwks["keys"] if k["kid"] == header.get("kid")), None)
+        if key is None:
+            raise HTTPException(status_code=401, detail="Invalid token: signing key not found")
+
+        claims = jwt.decode(
+            token,
+            key,
+            algorithms=[header.get("alg", "RS256")],
+            audience=COGNITO_APP_CLIENT_ID,
+            issuer=COGNITO_ISSUER,
+        )
+        # ID tokens carry token_use="id"; access tokens don't carry our custom claims
+        if claims.get("token_use") != "id":
+            raise HTTPException(status_code=401, detail="Expected a Cognito ID token")
+
+        return claims
+
+    except JWTError as e:
+        logger.warning(f"Cognito token verification failed: {e}")
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
 
 class UserContext(BaseModel):
     """User context for authorization"""
@@ -31,54 +84,7 @@ class UserContext(BaseModel):
     token: str
     can_access_all_patients: bool = False
 
-def get_user_by_token(token: str, user_id: Optional[int] = None) -> Optional[Users]:
-    """
-    Get user from database by token.
 
-    When multiple accounts share the same device (and therefore the same push
-    notification token), passing user_id via the X-User-ID header pins the
-    query to the exact account the caller logged in as.
-
-    Without user_id  -> filter by token only  (old behaviour, may match wrong user)
-    With user_id     -> filter by token AND id (always matches the right user)
-    """
-    try:
-        # Strip any leading/trailing whitespace from the token
-        # The frontend may send tokens with accidental trailing spaces
-        token = token.strip()
-
-        with DatabaseManager() as db_manager:
-            if not db_manager.db:
-                # DB connection failed — this is a server-side problem, not a bad token.
-                # Raise 503 so the frontend knows to retry, not re-login.
-                logger.error("Database connection failed during token lookup")
-                raise HTTPException(
-                    status_code=503,
-                    detail="Service temporarily unavailable. Please try again."
-                )
-
-            query = db_manager.db.query(Users).filter(
-                Users.token == token,
-                Users.status.in_([1, 4])   # Active users only
-            )
-
-            # If X-User-ID header was sent, add it to the WHERE clause.
-            # This disambiguates multiple accounts sharing the same push token
-            # (e.g. 3 test accounts on the same device).
-            if user_id is not None:
-                query = query.filter(Users.id == user_id)
-
-            user = query.first()
-            return user
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error getting user by token: {e}")
-        raise HTTPException(
-            status_code=503,
-            detail="Service temporarily unavailable. Please try again."
-        )
 
 def get_role_name(role_id: int) -> str:
     """Get role name from role ID"""
@@ -116,58 +122,39 @@ def determine_access_level(role_id: int) -> bool:
 
 async def get_current_user(
     credentials: HTTPAuthorizationCredentials = Depends(security),
-    x_user_id: Optional[str] = Header(default=None, alias="X-User-ID")
 ) -> UserContext:
     """
-    Get current authenticated user with role-based access control.
-
-    Reads Authorization: Bearer <token> as before.
-    Also reads optional X-User-ID header to disambiguate accounts that share
-    the same push notification token (multiple accounts on one device).
-
-    Without X-User-ID  -> matches by token only  (may pick wrong user if shared)
-    With    X-User-ID  -> matches by token AND id (always picks the right user)
+    Get current authenticated user by verifying the Cognito ID token
+    and building UserContext directly from its claims.
     """
     try:
-        # Extract token from Authorization header and strip whitespace
         token = credentials.credentials.strip()
-        
         if not token:
             raise HTTPException(status_code=401, detail="Token is required")
 
-        # Parse X-User-ID header if present
-        user_id: Optional[int] = None
-        if x_user_id:
-            try:
-                user_id = int(x_user_id.strip())
-            except ValueError:
-                raise HTTPException(
-                    status_code=400,
-                    detail="X-User-ID header must be a valid integer user ID."
-                )
+        claims = verify_cognito_token(token)
 
-        # Get user from database by token (+ optional user_id)
-        # get_user_by_token raises 503 on DB failure, returns None only for truly bad tokens
-        user = get_user_by_token(token, user_id)
-        if not user:
-            raise HTTPException(status_code=401, detail="Invalid token or user not found")
+        try:
+            user_id = int(claims.get("custom:id"))
+            role_id = int(claims.get("custom:roleId"))
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=401, detail="Token is missing required user/role claims")
 
-        # Determine access level
-        can_access_all = determine_access_level(user.role_id)
-        role_name = get_role_name(user.role_id)
-        full_name = f"{user.first_name or ''} {user.last_name or ''}".strip()
-        logger.debug(f"Authenticated user_id={user.id} role={role_name}")
+        role_name = claims.get("custom:roleName") or get_role_name(role_id)
+        full_name = f"{claims.get('given_name') or ''} {claims.get('family_name') or ''}".strip()
+        can_access_all = determine_access_level(role_id)
+
+        logger.debug(f"Authenticated user_id={user_id} role={role_name}")
 
         return UserContext(
-            user_id=user.id,
-            role_id=user.role_id,
+            user_id=user_id,
+            role_id=role_id,
             role_name=role_name,
-            email=user.email,
+            email=claims.get("email"),
             full_name=full_name,
             token=token,
             can_access_all_patients=can_access_all
         )
-        
     except HTTPException:
         raise
     except Exception as e:
