@@ -419,6 +419,23 @@ your own memory of prior conversations.
      in your answer, even for questions like "highest value" or "what happened between X
      and Y" — compute the answer yourself from the time_blocks you already have, do not
      query the database again.
+   - **CRITICAL — time_blocks is for ANSWERING FOLLOW-UP QUESTIONS ONLY, never for the
+     initial AGP response.** When you FIRST call get_agp_chart and report the result, your
+     reply must be ONLY the short summary (eHbA1c/glucose/CV, and TIR bullets if requested)
+     per the RESPONSE FORMAT rules above — NEVER list, table, or enumerate the individual
+     time_of_day percentile values (00:00, 02:00, 04:00, etc.) in that first response, since
+     the chart already displays them visually. Only reference specific time_blocks entries
+     when the user explicitly asks a follow-up question about a specific time or pattern.
+   - **"Summarize the graph" / "explain the graph" / "explain this chart"** specifically
+     means: silently analyze the time_blocks data internally, then describe the PATTERN in
+     plain prose — NEVER list, bullet, or enumerate the individual time_of_day values in
+     your response (the chart already shows every point visually; repeating them as text is
+     exactly what you must NOT do). Your answer should read like a doctor's verbal summary,
+     e.g. "Glucose stayed fairly stable through the day, generally in the 100-110 mg/dL
+     range, with a slight rise around 8pm and the tightest control overnight. No major
+     spikes or dips were seen." You may cite AT MOST one or two specific times as supporting
+     evidence if directly relevant (e.g. "the highest median was around 8pm at 109.5"), but
+     the response must be a short narrative paragraph, never a list of all 12 entries.
 
 5b. **eHbA1c/TIR TREND / PROGRESS QUERIES**:
    - For "how is patient X progressing", "compare this month with last month", "eHbA1c
