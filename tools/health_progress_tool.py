@@ -199,6 +199,21 @@ class HealthProgressBase(BaseTool):
                 "stats": {"avg_tir_pct": None, "avg_bp": None, "avg_hba1c": None}
             }
 
+        if metric == "bp":
+            bp = data.get("bp") or []
+            if not bp:
+                return None
+            return {
+                "type": "line",
+                "title": f"Blood Pressure - {from_date} to {to_date}",
+                "x_labels": [d["readingDate"] for d in bp],
+                "series": [
+                    {"name": "Systolic (mmHg)", "values": [d.get("averageSystolic", 0) for d in bp]},
+                    {"name": "Diastolic (mmHg)", "values": [d.get("averageDiastolic", 0) for d in bp]},
+                ],
+                "stats": {"avg_tir_pct": None, "avg_bp": None, "avg_hba1c": None}
+            }
+
         if metric == "heart_rate":
             hr = data.get("hr") or []
             if not hr:
@@ -320,6 +335,19 @@ class HealthProgressBase(BaseTool):
                 "max_steps": max_d.get("totalSteps", 0), "max_steps_date": max_d["readingDate"],
                 "min_steps": min_d.get("totalSteps", 0), "min_steps_date": min_d["readingDate"],
                 "avg_calories": round(sum(d.get("calories", 0) for d in activity) / len(activity)),
+            }
+        if metric == "bp":
+            bp = data.get("bp") or []
+            if not bp:
+                return {"days_count": 0}
+            max_sys = max(bp, key=lambda d: d.get("averageSystolic", 0))
+            min_sys = min(bp, key=lambda d: d.get("averageSystolic", 0))
+            return {
+                "days_count": len(bp),
+                "avg_systolic": round(sum(d.get("averageSystolic", 0) for d in bp) / len(bp), 1),
+                "avg_diastolic": round(sum(d.get("averageDiastolic", 0) for d in bp) / len(bp), 1),
+                "max_systolic": round(max_sys.get("averageSystolic", 0), 1), "max_systolic_date": max_sys["readingDate"],
+                "min_systolic": round(min_sys.get("averageSystolic", 0), 1), "min_systolic_date": min_sys["readingDate"],
             }
         if metric == "heart_rate":
             hr = data.get("hr") or []
@@ -488,6 +516,14 @@ class HealthProgressBase(BaseTool):
                 base_payload["activity"] = raw_activity[:RAW_FALLBACK_CAP]
                 if len(raw_activity) > RAW_FALLBACK_CAP:
                     base_payload["activity_note"] = f"Showing {RAW_FALLBACK_CAP} of {len(raw_activity)} entries."
+        elif metric == "bp":
+            if chart_data is not None:
+                base_payload["summary"] = self._summarize(metric, glucose_daily, data)
+            else:
+                raw_bp = data.get("bp") or []
+                base_payload["blood_pressure"] = raw_bp[:RAW_FALLBACK_CAP]
+                if len(raw_bp) > RAW_FALLBACK_CAP:
+                    base_payload["blood_pressure_note"] = f"Showing {RAW_FALLBACK_CAP} of {len(raw_bp)} entries."
         elif metric == "heart_rate":
             if chart_data is not None:
                 base_payload["summary"] = self._summarize(metric, glucose_daily, data)
@@ -644,3 +680,16 @@ class FBSTrendTool(HealthProgressBase):
     def _run(self, patient_id: Optional[int] = None, patient_name: Optional[str] = None,
               from_date: Optional[str] = None, to_date: Optional[str] = None) -> str:
         return self._run_for_metric("fbs", patient_id, patient_name, from_date, to_date)
+
+
+class BPTrendTool(HealthProgressBase):
+    name: str = "get_bp_trend"
+    description: str = (
+        "Get a patient's blood pressure chart over a date range — systolic "
+        "and diastolic per day. Use for: 'blood pressure trend', 'BP chart', "
+        "'BP this week', 'BP for patient X'." + _COMMON_TAIL
+    )
+
+    def _run(self, patient_id: Optional[int] = None, patient_name: Optional[str] = None,
+              from_date: Optional[str] = None, to_date: Optional[str] = None) -> str:
+        return self._run_for_metric("bp", patient_id, patient_name, from_date, to_date)

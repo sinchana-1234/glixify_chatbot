@@ -10,7 +10,7 @@ from tools.ehba1c_tir_tool import EHbA1cTIRTool
 from tools.health_progress_tool import (
     GlucoseTrendTool, TIRTrendTool, SleepTrendTool,
     ActivityTrendTool, HeartRateTrendTool, StressHRVTrendTool,
-    HbA1cTrendTool, FBSTrendTool
+    HbA1cTrendTool, FBSTrendTool, BPTrendTool
 )
 
 try:
@@ -40,7 +40,8 @@ try:
         DeviceTool,
         PatientSummaryTool,
         AGPChartTool,
-        EHbA1cTIRTool
+        EHbA1cTIRTool,
+        BPTrendTool,
     )
     TOOLS_AVAILABLE = True
 except ImportError as e:
@@ -693,6 +694,7 @@ Remember: You provide data analysis and insights, not medical diagnosis. Always 
                     FBSTrendTool(),          # Doctor/DHA: fasting blood sugar chart
                     AGPChartTool(),          # Doctor/DHA: AGP ribbon chart / TIR bucket snapshot
                     EHbA1cTIRTool(),         # Doctor/DHA: period-over-period eHbA1c/TIR comparison
+                    BPTrendTool(),
                 ]
                 
                 # Set user context on each tool
