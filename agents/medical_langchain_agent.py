@@ -5,7 +5,13 @@ Medical LangChain Agent for Revival Hospital System
 import logging
 from typing import List, Dict, Any
 from datetime import datetime, timedelta
-from tools.health_progress_tool import HealthProgressTool
+from tools.agp_chart_tool import AGPChartTool
+from tools.ehba1c_tir_tool import EHbA1cTIRTool
+from tools.health_progress_tool import (
+    GlucoseTrendTool, TIRTrendTool, SleepTrendTool,
+    ActivityTrendTool, HeartRateTrendTool, StressHRVTrendTool,
+    HbA1cTrendTool, FBSTrendTool
+)
 
 try:
     from langchain.agents import create_openai_tools_agent, AgentExecutor
@@ -116,16 +122,11 @@ class MedicalLangChainAgent:
 - You can query specific patients by name or ID, or perform multi-patient analysis
 - Always specify patient information when querying medical data
 
-🔀 **MANDATORY TOOL ROUTING — glucose/sleep/activity/BP/TIR/HR questions:**
-- If the question spans MORE THAN ONE DAY or asks for a trend/pattern/chart/summary
-  over a period (words like "trend", "this week", "quality", "pattern", "over the
-  last N days", or an explicit multi-day date range) — you MUST use
-  get_health_progress. NEVER use get_specific_medical_value for these, and NEVER
-  call get_specific_medical_value in a loop once per day to cover a range.
-- Only use get_specific_medical_value when the question is about ONE exact
-  moment or ONE single date (e.g. "glucose at 3pm", "sleep on July 5th").
-- If you are unsure which case applies, use get_health_progress — it can also
-  answer single-value questions.
+📈 **TREND/CHART QUERIES:** For any multi-day trend, pattern, or chart request
+(glucose, TIR, sleep, activity, heart rate, stress, HRV), use the matching
+get_*_trend tool (get_glucose_trend, get_tir_trend, get_sleep_trend,
+get_activity_trend, get_heart_rate_trend, get_stress_hrv_trend) — never
+get_specific_medical_value for a date range or trend-style question.
 """
             
             # Patient database info - role-based visibility
@@ -643,9 +644,16 @@ Remember: You provide data analysis and insights, not medical diagnosis. Always 
                     UserProfileTool(),  # Staff can view any patient's profile
                     DeviceTool() , # Staff can check any patient's device expiry
                     PatientSummaryTool(),
-                    HealthProgressTool(), # Doctor/DHA: glucose/BP/HR/stress/HRV/activity/sleep trends with chart data 
-                    AGPChartTool(),  # Staff can view any patient's AGP chart
-                    EHbA1cTIRTool()  # Staff can view any patient's eHbA1c/TIR trend
+                    GlucoseTrendTool(),      # Doctor/DHA: glucose trend + chart
+                    TIRTrendTool(),          # Doctor/DHA: day-by-day time-in-range chart
+                    SleepTrendTool(),        # Doctor/DHA: sleep quality chart
+                    ActivityTrendTool(),     # Doctor/DHA: activity/steps chart
+                    HeartRateTrendTool(),    # Doctor/DHA: heart rate chart
+                    StressHRVTrendTool(),    # Doctor/DHA: stress/HRV chart
+                    HbA1cTrendTool(),        # Doctor/DHA: eHbA1c daily trend chart
+                    FBSTrendTool(),          # Doctor/DHA: fasting blood sugar chart
+                    AGPChartTool(),          # Doctor/DHA: AGP ribbon chart / TIR bucket snapshot
+                    EHbA1cTIRTool(),         # Doctor/DHA: period-over-period eHbA1c/TIR comparison
                 ]
                 
                 # Set user context on each tool

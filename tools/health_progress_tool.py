@@ -1,21 +1,30 @@
 #!/usr/bin/env python3
 """
-Health Progress Tool
-Fetches daily vitals (glucose, BP, HR, stress, HRV, activity, sleep) for a
-patient from the healthProgress endpoint.
+Health Progress Tools
+Fetches daily vitals (glucose, TIR, sleep, activity, heart rate, stress/HRV)
+for a patient from the healthProgress endpoint.
+
+ARCHITECTURE NOTE: this used to be a single tool with a 'metric' parameter
+the LLM had to remember to set. That failed repeatedly in practice -- the
+LLM would correctly pick this tool but then silently drop 'metric' and fall
+through to the glucose default, even with explicit prompt instructions
+telling it not to. Tool NAME selection is a much stronger signal than
+parameter-filling, so this is now split into one tool per metric, each with
+its own clear name/description and NO metric parameter to forget. All six
+share the same fetch/chart/summarize logic via HealthProgressBase.
 
 The base URL is read from HEALTH_PROGRESS_BASE_URL in .env (loaded into
-os.environ by load_dotenv() at app startup) so this tool points at whichever
-environment (QA / production) the rest of the backend is configured for,
-without needing a code change to switch. No fallback default is used —
-if the setting is missing, the app fails loudly at import time rather than
-silently querying the wrong environment.
+os.environ by load_dotenv() at app startup) so these tools point at
+whichever environment (QA / production) the rest of the backend is
+configured for, without needing a code change to switch. No fallback
+default is used -- if the setting is missing, the app fails loudly at
+import time rather than silently querying the wrong environment.
 
-In addition to the text summary returned to the LLM, this tool stashes a
-chart-ready payload on `self.last_chart_data` — a side-channel the chat API
-route reads after the agent finishes, since a LangChain tool can only return
-text to the LLM itself. `last_chart_data` is cleared after each read so a
-stale chart never leaks into an unrelated later answer.
+Each tool stashes a chart-ready payload on `self.last_chart_data` -- a
+side-channel the chat API route reads after the agent finishes, since a
+LangChain tool can only return text to the LLM itself. `last_chart_data`
+is cleared after each read so a stale chart never leaks into an unrelated
+later answer.
 """
 
 import os
@@ -36,56 +45,15 @@ if not HEALTH_PROGRESS_BASE:
     )
 
 
-class HealthProgressTool(BaseTool):
-    name: str = "get_health_progress"
-    description: str = (
-        "Get a patient's daily health data over a date range: glucose analytics "
-        "(mean, TIR/TAR/TBR %, HbA1c estimate, FBS), blood pressure, heart rate, "
-        "stress, HRV, activity (steps/calories), sleep breakdown, medications, and "
-        "assigned doctor/DHA. Use for: 'glucose trend', 'BP for patient X', 'sleep "
-        "pattern', 'activity summary', 'time in range', 'what medications', 'who is "
-        "their doctor', 'graphs for patient X'. PREFER this tool over any single-"
-        "value lookup tool whenever the user wants a trend, pattern, or chart across "
-        "multiple days — this tool renders a real chart, single-value tools do not. "
-        "Requires EITHER patient_id (int) OR patient_name (str) — pass whichever the "
-        "user gave you; do NOT guess a patient_id when only a name was given, this "
-        "tool resolves the name itself. If multiple patients match the name, the "
-        "result will list them — relay that list and ask the user to pick one, do "
-        "not choose for them. from_date/to_date (YYYY-MM-DD) are OPTIONAL — if the "
-        "user doesn't mention a date range, omit them entirely and the tool will "
-        "default to the last 7 days. Pass 'metric' to choose which chart to build: "
-        "'glucose' (default, mean glucose trend), 'tir' (time in range breakdown — "
-        "above/in-range/below), 'sleep' (deep/light/REM sleep minutes per day), or "
-        "'activity' (daily step count). Match 'metric' to what the user actually "
-        "asked about — e.g. 'sleep quality' -> metric='sleep', 'time in range' -> "
-        "metric='tir', 'activity/steps' -> metric='activity'. The result includes a "
-        "'status' field: 'ok' (data found), 'ambiguous_name' (multiple patients "
-        "matched — ask which one), 'not_found' (no patient matched the name), "
-        "'no_data_in_range' (explicit dates given, none found — tell the user "
-        "plainly, do not substitute other dates), 'fallback_most_recent' (no dates "
-        "given, none in the last 7 days, showing older data instead), or "
-        "'no_data_at_all' (nothing found in 180 days). Always relay the 'notice' "
-        "field to the user when present, verbatim or close to it — do not invent "
-        "your own wording. IMPORTANT: only report the data relevant to what the "
-        "user actually asked about (e.g. only activity/steps if they asked for "
-        "activity) — do NOT dump unrelated fields like medications, supplements, "
-        "or full glucose readings unless the user specifically asked for those too. "
-        "If the requested metric has no data for the period shown (see "
-        "'metric_notice' in the result if present), say so plainly and briefly — "
-        "do not pad the answer with unrelated data instead. When the result has "
-        "'ok' status and more than one data point, a chart is ALREADY being shown "
-        "to the user automatically — do NOT also write out a table or list of the "
-        "individual daily values in your text reply. Instead give a brief 1-3 "
-        "sentence summary (e.g. average, highest, lowest, or a notable trend) and "
-        "let the chart carry the detail."
-    )
+class HealthProgressBase(BaseTool):
+    """Shared logic for all health-progress tools. Never instantiated
+    directly -- only the leaf subclasses below (one per metric) are."""
 
     def set_user_context(self, user_context):
         object.__setattr__(self, 'user_context', user_context)
         object.__setattr__(self, 'last_chart_data', None)
 
     def _fetch(self, patient_id: int, from_date: str, to_date: str, auth_token: str) -> dict:
-        """Single raw call to the healthProgress endpoint. Raises on failure."""
         resp = httpx.get(
             f"{HEALTH_PROGRESS_BASE}/{patient_id}/{from_date}/{to_date}",
             headers={"Authorization": f"Bearer {auth_token}"},
@@ -94,124 +62,7 @@ class HealthProgressTool(BaseTool):
         resp.raise_for_status()
         return resp.json()
 
-    def _build_chart(self, metric: str, glucose_daily: list, data: dict, from_date: str, to_date: str) -> dict:
-        """Builds the chart_data payload for the requested metric. Each metric
-        has a different natural chart shape, so the frontend switches on
-        'type' to pick the right Recharts component."""
-
-        if metric == "tir":
-            return {
-                "type": "overlayArea",
-                "title": f"Time in Range - {from_date} to {to_date}",
-                "x_labels": [d["glucoseDate"] for d in glucose_daily],
-                "series": [
-                    {"name": "Above (%)", "values": [d["tarPercent"] for d in glucose_daily]},
-                    {"name": "In Range (%)", "values": [d["tirPercent"] for d in glucose_daily]},
-                    {"name": "Below (%)", "values": [d["tbrPercent"] for d in glucose_daily]},
-                ],
-                "stats": {
-                    "avg_tir_pct": round(sum(d["tirPercent"] for d in glucose_daily) / len(glucose_daily), 1),
-                    "avg_bp": None,
-                    "avg_hba1c": None,
-                }
-            }
-
-        if metric == "sleep":
-            sleep = data.get("sleep") or []
-            if not sleep:
-                return None
-            return {
-                "type": "line",
-                "title": f"Sleep Quality - {from_date} to {to_date}",
-                "x_labels": [d["readingDate"] for d in sleep],
-                "series": [
-                    {"name": "Light Sleep (hrs)", "values": [round(d.get("lightSleep", 0) / 60, 1) for d in sleep]},
-                    {"name": "Deep Sleep (min)", "values": [d.get("deepSleep", 0) for d in sleep]},
-                    {"name": "REM Sleep (min)", "values": [d.get("remSleep", 0) for d in sleep]},
-                ],
-                "stats": {"avg_tir_pct": None, "avg_bp": None, "avg_hba1c": None}
-            }
-
-        if metric == "activity":
-            activity = data.get("activity") or []
-            if not activity:
-                return None
-            return {
-                "type": "line",
-                "title": f"Activity - {from_date} to {to_date}",
-                "x_labels": [d["readingDate"] for d in activity],
-                "series": [
-                    {"name": "Steps", "values": [d.get("totalSteps", 0) for d in activity]},
-                    {"name": "Calories (kcal)", "values": [d.get("calories", 0) for d in activity]},
-                ],
-                "dual_axis": True,
-                "stats": {"avg_tir_pct": None, "avg_bp": None, "avg_hba1c": None}
-            }
-
-        chart_data = {
-            "type": "line",
-            "title": f"Mean glucose - {from_date} to {to_date}",
-            "x_labels": [d["glucoseDate"] for d in glucose_daily],
-            "series": [{
-                "name": "Mean glucose (mg/dL)",
-                "values": [d["meanGlucose"] for d in glucose_daily]
-            }],
-            "stats": {
-                "avg_tir_pct": round(sum(d["tirPercent"] for d in glucose_daily) / len(glucose_daily), 1),
-                "avg_bp": None,
-                "avg_hba1c": round(
-                    sum(d["estimatedHba1c"] for d in glucose_daily if d.get("estimatedHba1c")) /
-                    max(1, len([d for d in glucose_daily if d.get("estimatedHba1c")])), 1
-                )
-            }
-        }
-        bp = data.get("bp") or []
-        if bp:
-            avg_sys = round(sum(d["averageSystolic"] for d in bp) / len(bp))
-            avg_dia = round(sum(d["averageDiastolic"] for d in bp) / len(bp))
-            chart_data["stats"]["avg_bp"] = f"{avg_sys}/{avg_dia}"
-        return chart_data
-
-    def _summarize(self, metric: str, glucose_daily: list, data: dict) -> dict:
-        """Small numeric summary used INSTEAD of the raw per-day array once a
-        chart is already being shown -- the chart carries the daily detail,
-        so the LLM is given nothing left to re-render as a table."""
-        if metric == "tir":
-            return {
-                "days_count": len(glucose_daily),
-                "avg_tir_pct": round(sum(d["tirPercent"] for d in glucose_daily) / len(glucose_daily), 1),
-                "avg_tar_pct": round(sum(d["tarPercent"] for d in glucose_daily) / len(glucose_daily), 1),
-                "avg_tbr_pct": round(sum(d["tbrPercent"] for d in glucose_daily) / len(glucose_daily), 1),
-            }
-        if metric == "sleep":
-            sleep = data.get("sleep") or []
-            if not sleep:
-                return {"days_count": 0}
-            return {
-                "days_count": len(sleep),
-                "avg_light_hrs": round(sum(d.get("lightSleep", 0) for d in sleep) / len(sleep) / 60, 1),
-                "avg_deep_min": round(sum(d.get("deepSleep", 0) for d in sleep) / len(sleep)),
-                "avg_rem_min": round(sum(d.get("remSleep", 0) for d in sleep) / len(sleep)),
-            }
-        if metric == "activity":
-            activity = data.get("activity") or []
-            if not activity:
-                return {"days_count": 0}
-            steps = [d.get("totalSteps", 0) for d in activity]
-            return {
-                "days_count": len(activity),
-                "avg_steps": round(sum(steps) / len(steps)),
-                "max_steps": max(steps),
-                "min_steps": min(steps),
-                "avg_calories": round(sum(d.get("calories", 0) for d in activity) / len(activity)),
-            }
-        return {}
-
     def _resolve_patient_id(self, patient_id: Optional[int], patient_name: Optional[str]) -> tuple:
-        """Resolves patient_id from patient_name if needed, using the same
-        substring-match pattern already proven working in UserProfileTool.
-        Returns (resolved_id, error_response_or_None). If error_response is
-        not None, _run should return it immediately without proceeding."""
         if patient_id:
             return patient_id, None
         if not patient_name:
@@ -278,12 +129,218 @@ class HealthProgressTool(BaseTool):
 
             return matching_users[0].id, None
 
-    def _run(self, patient_id: Optional[int] = None, patient_name: Optional[str] = None,
-             from_date: Optional[str] = None, to_date: Optional[str] = None,
-             metric: Optional[str] = "glucose") -> str:
-        if metric not in ("glucose", "tir", "sleep", "activity"):
-            metric = "glucose"
+    def _build_chart(self, metric: str, glucose_daily: list, data: dict, from_date: str, to_date: str) -> dict:
+        if metric == "hba1c":
+            valid = [d for d in glucose_daily if d.get("estimatedHba1c") is not None]
+            if not valid:
+                return None
+            return {
+                "type": "area",
+                "title": f"eHbA1c Trend - {from_date} to {to_date}",
+                "x_labels": [d["glucoseDate"] for d in valid],
+                "series": [
+                    {"name": "eHbA1c (%)", "values": [d["estimatedHba1c"] for d in valid]},
+                ],
+                "color": "#4a90e2",
+                "stats": {"avg_tir_pct": None, "avg_bp": None, "avg_hba1c": None}
+            }
 
+        if metric == "fbs":
+            valid = [d for d in glucose_daily if d.get("fbs") is not None]
+            if not valid:
+                return None
+            return {
+                "type": "area",
+                "title": f"Fasting Blood Sugar - {from_date} to {to_date}",
+                "x_labels": [d["glucoseDate"] for d in valid],
+                "series": [
+                    {"name": "Fasting BS (mg/dL)", "values": [d["fbs"] for d in valid]},
+                ],
+                "color": "#e0576a",
+                "stats": {"avg_tir_pct": None, "avg_bp": None, "avg_hba1c": None}
+            }
+
+        if metric == "tir":
+            return {
+                "type": "overlayArea",
+                "title": f"Time in Range - {from_date} to {to_date}",
+                "x_labels": [d["glucoseDate"] for d in glucose_daily],
+                "series": [
+                    {"name": "Above (%)", "values": [d["tarPercent"] for d in glucose_daily]},
+                    {"name": "In Range (%)", "values": [d["tirPercent"] for d in glucose_daily]},
+                    {"name": "Below (%)", "values": [d["tbrPercent"] for d in glucose_daily]},
+                ],
+                "stats": {
+                    "avg_tir_pct": round(sum(d["tirPercent"] for d in glucose_daily) / len(glucose_daily), 1),
+                    "avg_bp": None, "avg_hba1c": None,
+                }
+            }
+
+        if metric == "sleep":
+            sleep = data.get("sleep") or []
+            if not sleep:
+                return None
+            return {
+                "type": "line",
+                "title": f"Sleep Quality - {from_date} to {to_date}",
+                "x_labels": [d["readingDate"] for d in sleep],
+                "series": [
+                    {"name": "Light Sleep (hrs)", "values": [round(d.get("lightSleep", 0) / 60, 1) for d in sleep]},
+                    {"name": "Deep Sleep (hrs)", "values": [round(d.get("deepSleep", 0) / 60, 1) for d in sleep]},
+                    {"name": "REM Sleep (hrs)", "values": [round(d.get("remSleep", 0) / 60, 1) for d in sleep]},
+                ],
+                "stats": {"avg_tir_pct": None, "avg_bp": None, "avg_hba1c": None}
+            }
+
+        if metric == "activity":
+            activity = data.get("activity") or []
+            if not activity:
+                return None
+            return {
+                "type": "line",
+                "title": f"Activity - {from_date} to {to_date}",
+                "x_labels": [d["readingDate"] for d in activity],
+                "series": [
+                    {"name": "Steps", "values": [d.get("totalSteps", 0) for d in activity]},
+                    {"name": "Calories (kcal)", "values": [d.get("calories", 0) for d in activity]},
+                ],
+                "dual_axis": True,
+                "stats": {"avg_tir_pct": None, "avg_bp": None, "avg_hba1c": None}
+            }
+
+        if metric == "heart_rate":
+            hr = data.get("hr") or []
+            if not hr:
+                return None
+            return {
+                "type": "line",
+                "title": f"Heart Rate - {from_date} to {to_date}",
+                "x_labels": [d["readingDate"] for d in hr],
+                "series": [
+                    {"name": "Average (bpm)", "values": [d.get("averageHeartRate", 0) for d in hr]},
+                    {"name": "Low (bpm)", "values": [d.get("lowHeartRate", 0) for d in hr]},
+                    {"name": "High (bpm)", "values": [d.get("highHeartRate", 0) for d in hr]},
+                    {"name": "Resting (bpm)", "values": [d.get("restingHeartRate", 0) for d in hr]},
+                ],
+                "stats": {"avg_tir_pct": None, "avg_bp": None, "avg_hba1c": None}
+            }
+
+        if metric == "stress_hrv":
+            stress = data.get("stress") or []
+            hrv = data.get("hrv") or []
+            if not stress and not hrv:
+                return None
+            dates = [d["readingDate"] for d in stress] if stress else [d["readingDate"] for d in hrv]
+            hrv_by_date = {d["readingDate"]: d.get("average", 0) for d in hrv}
+            stress_by_date = {d["readingDate"]: d.get("average", 0) for d in stress}
+            return {
+                "type": "line",
+                "title": f"Stress / HRV - {from_date} to {to_date}",
+                "x_labels": dates,
+                "series": [
+                    {"name": "Stress (%)", "values": [stress_by_date.get(dt, 0) for dt in dates]},
+                    {"name": "HRV (ms)", "values": [hrv_by_date.get(dt, 0) for dt in dates]},
+                ],
+                "stats": {"avg_tir_pct": None, "avg_bp": None, "avg_hba1c": None}
+            }
+
+        chart_data = {
+            "type": "line",
+            "title": f"Mean glucose - {from_date} to {to_date}",
+            "x_labels": [d["glucoseDate"] for d in glucose_daily],
+            "series": [{
+                "name": "Mean glucose (mg/dL)",
+                "values": [d["meanGlucose"] for d in glucose_daily]
+            }],
+            "stats": {
+                "avg_tir_pct": round(sum(d["tirPercent"] for d in glucose_daily) / len(glucose_daily), 1),
+                "avg_bp": None,
+                "avg_hba1c": round(
+                    sum(d["estimatedHba1c"] for d in glucose_daily if d.get("estimatedHba1c")) /
+                    max(1, len([d for d in glucose_daily if d.get("estimatedHba1c")])), 1
+                )
+            }
+        }
+        bp = data.get("bp") or []
+        if bp:
+            avg_sys = round(sum(d["averageSystolic"] for d in bp) / len(bp))
+            avg_dia = round(sum(d["averageDiastolic"] for d in bp) / len(bp))
+            chart_data["stats"]["avg_bp"] = f"{avg_sys}/{avg_dia}"
+        return chart_data
+
+    def _summarize(self, metric: str, glucose_daily: list, data: dict) -> dict:
+        if metric == "hba1c":
+            valid = [d["estimatedHba1c"] for d in glucose_daily if d.get("estimatedHba1c") is not None]
+            if not valid:
+                return {"days_count": 0}
+            return {
+                "days_count": len(valid),
+                "avg_hba1c_pct": round(sum(valid) / len(valid), 2),
+                "max_hba1c_pct": round(max(valid), 2),
+                "min_hba1c_pct": round(min(valid), 2),
+            }
+        if metric == "fbs":
+            valid = [d["fbs"] for d in glucose_daily if d.get("fbs") is not None]
+            if not valid:
+                return {"days_count": 0}
+            return {
+                "days_count": len(valid),
+                "avg_fbs": round(sum(valid) / len(valid), 1),
+                "max_fbs": round(max(valid), 1),
+                "min_fbs": round(min(valid), 1),
+            }
+        if metric == "tir":
+            return {
+                "days_count": len(glucose_daily),
+                "avg_tir_pct": round(sum(d["tirPercent"] for d in glucose_daily) / len(glucose_daily), 1),
+                "avg_tar_pct": round(sum(d["tarPercent"] for d in glucose_daily) / len(glucose_daily), 1),
+                "avg_tbr_pct": round(sum(d["tbrPercent"] for d in glucose_daily) / len(glucose_daily), 1),
+            }
+        if metric == "sleep":
+            sleep = data.get("sleep") or []
+            if not sleep:
+                return {"days_count": 0}
+            return {
+                "days_count": len(sleep),
+                "avg_light_hrs": round(sum(d.get("lightSleep", 0) for d in sleep) / len(sleep) / 60, 1),
+                "avg_deep_hrs": round(sum(d.get("deepSleep", 0) for d in sleep) / len(sleep) / 60, 1),
+                "avg_rem_hrs": round(sum(d.get("remSleep", 0) for d in sleep) / len(sleep) / 60, 1),
+            }
+        if metric == "activity":
+            activity = data.get("activity") or []
+            if not activity:
+                return {"days_count": 0}
+            steps = [d.get("totalSteps", 0) for d in activity]
+            return {
+                "days_count": len(activity),
+                "avg_steps": round(sum(steps) / len(steps)),
+                "max_steps": max(steps),
+                "min_steps": min(steps),
+                "avg_calories": round(sum(d.get("calories", 0) for d in activity) / len(activity)),
+            }
+        if metric == "heart_rate":
+            hr = data.get("hr") or []
+            if not hr:
+                return {"days_count": 0}
+            return {
+                "days_count": len(hr),
+                "avg_hr_bpm": round(sum(d.get("averageHeartRate", 0) for d in hr) / len(hr), 1),
+                "max_hr_bpm": max(d.get("highHeartRate", 0) for d in hr),
+                "min_hr_bpm": min(d.get("lowHeartRate", 0) for d in hr),
+            }
+        if metric == "stress_hrv":
+            stress = data.get("stress") or []
+            hrv = data.get("hrv") or []
+            return {
+                "days_count": max(len(stress), len(hrv)),
+                "avg_stress_pct": round(sum(d.get("average", 0) for d in stress) / len(stress), 1) if stress else None,
+                "avg_hrv_ms": round(sum(d.get("average", 0) for d in hrv) / len(hrv), 1) if hrv else None,
+            }
+        return {}
+
+    def _run_for_metric(self, metric: str, patient_id: Optional[int] = None,
+                         patient_name: Optional[str] = None,
+                         from_date: Optional[str] = None, to_date: Optional[str] = None) -> str:
         patient_id, resolution_error = self._resolve_patient_id(patient_id, patient_name)
         if resolution_error:
             object.__setattr__(self, 'last_chart_data', None)
@@ -318,7 +375,7 @@ class HealthProgressTool(BaseTool):
             if user_specified_range:
                 status = "no_data_in_range"
                 notice = (
-                    f"There are no glucose trends for patient {patient_id} "
+                    f"There is no data for patient {patient_id} "
                     f"between {from_date} and {to_date}."
                 )
                 object.__setattr__(self, 'last_chart_data', None)
@@ -327,7 +384,6 @@ class HealthProgressTool(BaseTool):
                     "date_range": f"{from_date} to {to_date}",
                     "status": status,
                     "notice": notice,
-                    "glucose_daily": []
                 })
             else:
                 fallback_from = (datetime.now() - timedelta(days=180)).strftime("%Y-%m-%d")
@@ -338,13 +394,10 @@ class HealthProgressTool(BaseTool):
                 probe_glucose = probe_data.get("glucoseDailyAnalytics") or []
                 if not probe_glucose:
                     status = "no_data_at_all"
-                    notice = f"No glucose readings were found for patient {patient_id} in the last 180 days."
+                    notice = f"No data was found for patient {patient_id} in the last 180 days."
                     object.__setattr__(self, 'last_chart_data', None)
                     return json.dumps({
-                        "patient_id": patient_id,
-                        "status": status,
-                        "notice": notice,
-                        "glucose_daily": []
+                        "patient_id": patient_id, "status": status, "notice": notice,
                     })
 
                 most_recent_date = max(d["glucoseDate"] for d in probe_glucose)
@@ -361,7 +414,7 @@ class HealthProgressTool(BaseTool):
                 glucose_daily = data.get("glucoseDailyAnalytics") or []
                 status = "fallback_most_recent"
                 notice = (
-                    f"No glucose data in the last 7 days ({from_date} to {to_date}). "
+                    f"No data in the last 7 days ({from_date} to {to_date}). "
                     f"Showing the most recent available week: {actual_from} to {actual_to}."
                 )
                 from_date, to_date = actual_from, actual_to
@@ -403,7 +456,6 @@ class HealthProgressTool(BaseTool):
             "date_range": f"{from_date} to {to_date}",
             "status": status,
             "notice": notice,
-            "metric_requested": metric,
             "metric_notice": metric_notice,
         }
 
@@ -419,6 +471,10 @@ class HealthProgressTool(BaseTool):
                 base_payload["glucose_daily"] = glucose_daily[:RAW_FALLBACK_CAP]
                 if len(glucose_daily) > RAW_FALLBACK_CAP:
                     base_payload["glucose_daily_note"] = f"Showing {RAW_FALLBACK_CAP} of {len(glucose_daily)} entries."
+        elif metric == "hba1c":
+            base_payload["summary"] = self._summarize(metric, glucose_daily, data)
+        elif metric == "fbs":
+            base_payload["summary"] = self._summarize(metric, glucose_daily, data)
         elif metric == "sleep":
             if chart_data is not None:
                 base_payload["summary"] = self._summarize(metric, glucose_daily, data)
@@ -435,6 +491,15 @@ class HealthProgressTool(BaseTool):
                 base_payload["activity"] = raw_activity[:RAW_FALLBACK_CAP]
                 if len(raw_activity) > RAW_FALLBACK_CAP:
                     base_payload["activity_note"] = f"Showing {RAW_FALLBACK_CAP} of {len(raw_activity)} entries."
+        elif metric == "heart_rate":
+            base_payload["heart_rate" if chart_data is None else "summary"] = \
+                (data.get("hr") or []) if chart_data is None else self._summarize(metric, glucose_daily, data)
+        elif metric == "stress_hrv":
+            if chart_data is not None:
+                base_payload["summary"] = self._summarize(metric, glucose_daily, data)
+            else:
+                base_payload["stress"] = data.get("stress") or []
+                base_payload["hrv"] = data.get("hrv") or []
         else:
             base_payload.update({
                 "glucose_daily": glucose_daily[:RAW_FALLBACK_CAP],
@@ -449,3 +514,128 @@ class HealthProgressTool(BaseTool):
             })
 
         return json.dumps(base_payload)
+
+
+_COMMON_TAIL = (
+    " Requires EITHER patient_id (int) OR patient_name (str) — pass whichever "
+    "the user gave you; do NOT guess a patient_id when only a name was given, "
+    "this tool resolves the name itself. If multiple patients match the name, "
+    "relay the returned list and ask the user which one — do not choose "
+    "yourself. from_date/to_date (YYYY-MM-DD) are OPTIONAL — if omitted, "
+    "defaults to the last 7 days. The result includes a 'status' field: 'ok', "
+    "'ambiguous_name', 'not_found', 'no_data_in_range' (explicit dates given, "
+    "none found — say so plainly, never substitute other dates), "
+    "'fallback_most_recent' (no dates given, none in the last 7 days, showing "
+    "older data instead), or 'no_data_at_all'. Always relay the 'notice' field "
+    "verbatim when present. A chart is ALREADY shown automatically when data "
+    "is found — do NOT write out a table or list of daily values yourself; "
+    "give only a brief 1-3 sentence summary."
+)
+
+
+class GlucoseTrendTool(HealthProgressBase):
+    name: str = "get_glucose_trend"
+    description: str = (
+        "Get a patient's glucose trend over a date range: mean glucose, "
+        "TIR/TAR/TBR %, HbA1c estimate, FBS, plus BP, medications, and "
+        "assigned doctor/DHA. Use for: 'glucose trend', 'sugar levels this "
+        "week', 'BP for patient X', 'what medications', 'who is their "
+        "doctor'." + _COMMON_TAIL
+    )
+
+    def _run(self, patient_id: Optional[int] = None, patient_name: Optional[str] = None,
+              from_date: Optional[str] = None, to_date: Optional[str] = None) -> str:
+        return self._run_for_metric("glucose", patient_id, patient_name, from_date, to_date)
+
+
+class TIRTrendTool(HealthProgressBase):
+    name: str = "get_tir_trend"
+    description: str = (
+        "Get a patient's Time in Range (TIR) chart over a date range — "
+        "percentage of time above/in-range/below target glucose. Use for: "
+        "'time in range', 'TIR', 'TIR trend for patient X'." + _COMMON_TAIL
+    )
+
+    def _run(self, patient_id: Optional[int] = None, patient_name: Optional[str] = None,
+              from_date: Optional[str] = None, to_date: Optional[str] = None) -> str:
+        return self._run_for_metric("tir", patient_id, patient_name, from_date, to_date)
+
+
+class SleepTrendTool(HealthProgressBase):
+    name: str = "get_sleep_trend"
+    description: str = (
+        "Get a patient's sleep quality chart over a date range — deep, "
+        "light, and REM sleep hours per day. Use for: 'sleep quality', "
+        "'sleep trend', 'sleep pattern', 'sleep this week/for a range of "
+        "dates'. For ONE single date only, use get_specific_medical_value "
+        "instead." + _COMMON_TAIL
+    )
+
+    def _run(self, patient_id: Optional[int] = None, patient_name: Optional[str] = None,
+              from_date: Optional[str] = None, to_date: Optional[str] = None) -> str:
+        return self._run_for_metric("sleep", patient_id, patient_name, from_date, to_date)
+
+
+class ActivityTrendTool(HealthProgressBase):
+    name: str = "get_activity_trend"
+    description: str = (
+        "Get a patient's activity chart over a date range — daily steps and "
+        "calories burned. Use for: 'activity', 'steps', 'activity summary/"
+        "trend for patient X'." + _COMMON_TAIL
+    )
+
+    def _run(self, patient_id: Optional[int] = None, patient_name: Optional[str] = None,
+              from_date: Optional[str] = None, to_date: Optional[str] = None) -> str:
+        return self._run_for_metric("activity", patient_id, patient_name, from_date, to_date)
+
+
+class HeartRateTrendTool(HealthProgressBase):
+    name: str = "get_heart_rate_trend"
+    description: str = (
+        "Get a patient's heart rate chart over a date range — average, low, "
+        "high, and resting heart rate per day. Use for: 'heart rate trend', "
+        "'heart rate this week', 'heart rate for patient X'." + _COMMON_TAIL
+    )
+
+    def _run(self, patient_id: Optional[int] = None, patient_name: Optional[str] = None,
+              from_date: Optional[str] = None, to_date: Optional[str] = None) -> str:
+        return self._run_for_metric("heart_rate", patient_id, patient_name, from_date, to_date)
+
+
+class StressHRVTrendTool(HealthProgressBase):
+    name: str = "get_stress_hrv_trend"
+    description: str = (
+        "Get a patient's stress and HRV (Heart Rate Variability) chart over "
+        "a date range. Use for: 'stress trend', 'HRV', 'stress and HRV for "
+        "patient X'." + _COMMON_TAIL
+    )
+
+    def _run(self, patient_id: Optional[int] = None, patient_name: Optional[str] = None,
+              from_date: Optional[str] = None, to_date: Optional[str] = None) -> str:
+        return self._run_for_metric("stress_hrv", patient_id, patient_name, from_date, to_date)
+
+
+
+class HbA1cTrendTool(HealthProgressBase):
+    name: str = "get_hba1c_trend"
+    description: str = (
+        "Get a patient's estimated HbA1c trend chart over a date range. "
+        "Use for: 'eHbA1c trend', 'HbA1c chart', 'HbA1c for patient X'." + _COMMON_TAIL
+    )
+
+    def _run(self, patient_id: Optional[int] = None, patient_name: Optional[str] = None,
+              from_date: Optional[str] = None, to_date: Optional[str] = None) -> str:
+        return self._run_for_metric("hba1c", patient_id, patient_name, from_date, to_date)
+
+
+class FBSTrendTool(HealthProgressBase):
+    name: str = "get_fbs_trend"
+    description: str = (
+        "Get a patient's Fasting Blood Sugar (FBS) trend chart over a date "
+        "range. Use for: 'fasting blood sugar', 'FBS trend', 'FBS for "
+        "patient X'." + _COMMON_TAIL
+    )
+
+    def _run(self, patient_id: Optional[int] = None, patient_name: Optional[str] = None,
+              from_date: Optional[str] = None, to_date: Optional[str] = None) -> str:
+        return self._run_for_metric("fbs", patient_id, patient_name, from_date, to_date)
