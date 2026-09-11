@@ -166,9 +166,13 @@ class AGPChartTool(BaseTool):
                 "actual_monitoring_period": actual_period,
                 "summary": agp_data["summary"],
                 "tir": agp_data["tir"] if include_tir else None,
+                "time_blocks": time_blocks,
                 "message": f"Data available for: {actual_period}. "
                             f"IMPORTANT: use this exact period in your response, "
-                            f"NOT the requested date range."
+                            f"NOT the requested date range. The time_blocks array is "
+                            f"provided so you can answer any follow-up questions about "
+                            f"specific times/values shown in the chart, without needing "
+                            f"to call this tool again."
             })
 
         except httpx.HTTPStatusError as e:

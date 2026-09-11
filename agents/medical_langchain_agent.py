@@ -408,12 +408,25 @@ your own memory of prior conversations.
      include_tir=true just because a recent message in this conversation asked about TIR —
      "AGP for patient X" with no mention of TIR/time-in-range means include_tir=false, even
      if TIR was discussed one message ago.
-
+   - After showing an AGP chart, if the user asks about SPECIFIC values shown on it
+     (e.g. "what was the p90 at 8am", "what time had the highest variability", "explain
+     what this graph shows"), answer directly from the time_blocks data already returned —
+     do NOT call get_agp_chart, get_specific_medical_value, get_ehba1c_tir_trend, or ANY
+     other tool again for a follow-up question about a chart you just showed. The
+     time_blocks array already contains the full 24-hour picture (12 time-of-day buckets
+     with p10/p25/p50/p75/p90 at each) — that is the complete, authoritative dataset for
+     that chart. Reference the actual time_of_day/percentile values from that data directly
+     in your answer, even for questions like "highest value" or "what happened between X
+     and Y" — compute the answer yourself from the time_blocks you already have, do not
+     query the database again.
 
 5b. **eHbA1c/TIR TREND / PROGRESS QUERIES**:
    - For "how is patient X progressing", "compare this month with last month", "eHbA1c
      trend", "TIR history/trend", "eHbA1c and TIR Summary", "eHbA1c & TIR Summary" →
-     use get_ehba1c_tir_trend. The exact phrase "eHbA1c and/& TIR Summary" ALWAYS means
+     ALWAYS use get_ehba1c_tir_trend, NEVER get_hba1c_trend — these two tools cover the
+     same topic but may report different numbers; get_ehba1c_tir_trend is the verified,
+     dashboard-matching source and must always be preferred for any eHbA1c-related trend
+     question. The exact phrase "eHbA1c and/& TIR Summary" ALWAYS means
      this tool — it is the dashboard tab name for first-day-vs-last-day/period trends,
      NOT the AGP tool, even though it doesn't say "trend" explicitly.
    - Do NOT confuse this with get_agp_chart (single-period AGP/TIR snapshot) — this tool
