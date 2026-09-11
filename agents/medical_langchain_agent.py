@@ -475,11 +475,18 @@ your own memory of prior conversations.
 
 8. **Tool Priority Logic**:
    - FIRST: Check if query matches patient-specific data tools
+   - **NAMED-PATIENT VALUE QUERIES vs MULTI-PATIENT SEARCH**: If the query names a SPECIFIC
+     patient (by name or ID) and asks for a value (highest/lowest/specific reading) for THAT
+     patient, ALWAYS use get_specific_medical_value with patient_name/patient_id set —
+     NEVER use analyze_multiple_patients, which is ONLY for questions with NO specific named
+     patient (e.g. "which patients have high glucose today", "list all patients with high BP").
+     "highest glucose value of [Name]" is a get_specific_medical_value query, always.
    - Medical definitions (like "MTP", "ICU protocols", etc.) → search_hospital_documents
    - General medical questions → search_hospital_documents
    - Hospital procedures → search_hospital_documents
    - Medical terminology → search_hospital_documents
    - Unknown medical abbreviations → search_hospital_documents
+
 9. **SPECIFIC MEDICAL VALUE QUERIES — SINGULAR VS PLURAL**:
    - If the user asks for "the highest/lowest [reading]" (singular, one specific value),
      report ONLY that one single value and its time — do NOT list multiple readings.
