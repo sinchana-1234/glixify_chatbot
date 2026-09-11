@@ -17,6 +17,9 @@ from .doctor_patient_mapping_tool import DoctorPatientMappingTool
 from .user_profile_tool import UserProfileTool
 from .device_tool import DeviceTool
 from .patient_summary_tool import PatientSummaryTool
+from .agp_chart_tool import AGPChartTool
+from .ehba1c_tir_tool import EHbA1cTIRTool
+
 
 
 __all__ = [
@@ -33,5 +36,7 @@ __all__ = [
     'UserProfileTool',
     'DeviceTool',
     'PatientSummaryTool',
+    'AGPChartTool',
+    'EHbA1cTIRTool',
 
 ]

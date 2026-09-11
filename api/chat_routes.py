@@ -46,6 +46,8 @@ class QueryResponse(BaseModel):
     response: str
     sessionId: Optional[str] = None
     metadata: Optional[Dict[str, Any]] = None
+    agpChartData: Optional[Dict[str, Any]] = None
+    ehba1cTirData: Optional[Dict[str, Any]] = None
     user_context: Optional[Dict[str, Any]] = None
     chart_data: Optional[Dict[str, Any]] = None  # present only when the answer includes a renderable chart
  
@@ -85,6 +87,9 @@ class VoiceQueryResponse(BaseModel):
     response: str
     sessionId: Optional[str] = None
     metadata: Optional[Dict[str, Any]] = None
+    chart_data: Optional[Dict[str, Any]] = None
+    agpChartData: Optional[Dict[str, Any]] = None
+    ehba1cTirData: Optional[Dict[str, Any]] = None
     user_context: Optional[Dict[str, Any]] = None
     transcript: Optional[str] = None
  
@@ -309,11 +314,20 @@ async def handle_query(
                     'role_name': current_user.role_name,
                     'can_access_all_patients': current_user.can_access_all_patients,
                     'authorized_patient_id': authorized_patient_id,
-                    'auth_token': authorization.replace("Bearer ", "").strip() if authorization else None
+                    'auth_token': authorization.replace("Bearer ", "").strip() if authorization else None,
+                    'token': current_user.token
                 })
  
             result = await session_agent.chat(query_with_context)
             logger.info(f"✅ Medical agent response generated successfully for user {current_user.user_id}")
+
+            # Pick up any chart data the tools generated this turn, without
+            # ever routing it through the LLM's own reasoning.
+            agp_chart_data = None
+            ehba1c_tir_data = None
+            if hasattr(session_agent, 'user_context') and session_agent.user_context:
+                agp_chart_data = session_agent.user_context.pop('_last_agp_chart_data', None)
+                ehba1c_tir_data = session_agent.user_context.pop('_last_ehba1c_tir_data', None)
  
             result_metadata = result.get("metadata", {}) if isinstance(result, dict) else {}
             result_metadata["session_id"] = session_id
@@ -326,6 +340,8 @@ async def handle_query(
                 sessionId=session_id,
                 metadata=result_metadata,
                 chart_data=result.get("chart_data") if isinstance(result, dict) else None,
+                agpChartData=agp_chart_data,
+                ehba1cTirData=ehba1c_tir_data,
                 user_context={
                     "user_id": current_user.user_id,
                     "role_name": current_user.role_name,
@@ -400,11 +416,20 @@ async def handle_voice_query(
                 'role_id': current_user.role_id,
                 'role_name': current_user.role_name,
                 'can_access_all_patients': current_user.can_access_all_patients,
-                'authorized_patient_id': authorized_patient_id
+                'authorized_patient_id': authorized_patient_id,
+                'auth_token': authorization.replace("Bearer ", "").strip() if authorization else None,
+                'token': current_user.token
             })
- 
+
         # 6) Ask the agent
         result = await session_agent.chat(query_with_context)
+
+        # Pick up any chart data the tools generated this turn
+        agp_chart_data = None
+        ehba1c_tir_data = None
+        if hasattr(session_agent, 'user_context') and session_agent.user_context:
+            agp_chart_data = session_agent.user_context.pop('_last_agp_chart_data', None)
+            ehba1c_tir_data = session_agent.user_context.pop('_last_ehba1c_tir_data', None)
         logger.info(f"✅ Voice query processed for user {current_user.user_id}")
  
         # 7) Metadata
@@ -422,6 +447,9 @@ async def handle_voice_query(
             response=result.get("message", "") if isinstance(result, dict) else str(result),
             sessionId=session_id,
             metadata=result_metadata,
+            chart_data=result.get("chart_data") if isinstance(result, dict) else None,
+            agpChartData=agp_chart_data,
+            ehba1cTirData=ehba1c_tir_data,
             user_context={
                 "user_id": current_user.user_id,
                 "role_name": current_user.role_name,

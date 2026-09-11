@@ -51,8 +51,64 @@ class SpecificMedicalValueTool(BaseTool):
                 patient_name = None
                 logger.info(f"Patient access → ID {patient_id}")
 
+            # Staff can identify the patient by name — resolve it to an ID the
+            # same way UserProfileTool/DoctorPatientMappingTool do, instead of
+            # silently proceeding with no patient (which previously let the
+            # agent fall back to showing OTHER patients' medical data).
+            elif not patient_id and patient_name:
+                from dal.database import DatabaseManager
+                with DatabaseManager() as db_manager:
+                    # Scope to THIS doctor's own patients first — resolves most
+                    # name ambiguity automatically (e.g. multiple "Vikas Reddy" in
+                    # the hospital, but only one assigned to this doctor).
+                    doctor_id = user_context.get('user_id') if user_context else None
+                    own_patients = db_manager.get_doctor_patients(doctor_user_id=doctor_id) if doctor_id else []
+                    own_matching = [
+                        p for p in own_patients
+                        if patient_name.lower() in f"{p.get('patient_first_name') or ''} {p.get('patient_last_name') or ''}".lower()
+                    ]
+
+                    if own_matching:
+                        if len(own_matching) > 1:
+                            return json.dumps({
+                                "error": f"Multiple patients found matching '{patient_name}'",
+                                "matching_patients": [
+                                    {"id": p["patient_id"], "name": f"{p.get('patient_first_name') or ''} {p.get('patient_last_name') or ''}".strip()}
+                                    for p in own_matching
+                                ],
+                                "suggestion": "Please specify the exact patient ID."
+                            })
+                        patient_id = own_matching[0]["patient_id"]
+                    else:
+                        # Fall back to searching all patients only if none of the
+                        # doctor's own patients match (e.g. covering-for-a-colleague).
+                        users = db_manager.get_users()
+                        matching = [
+                            u for u in users
+                            if patient_name.lower() in f"{u.first_name or ''} {u.last_name or ''}".lower()
+                            and u.role_id == 1
+                        ]
+                        if not matching:
+                            return json.dumps({
+                                "error": f"No patient found matching '{patient_name}'. Please check the spelling or try the full name. "
+                                         f"Do not substitute another patient's data for this request."
+                            })
+                        if len(matching) > 1:
+                            return json.dumps({
+                                "error": f"Multiple patients found matching '{patient_name}'",
+                                "matching_patients": [
+                                    {"id": u.id, "name": f"{u.first_name or ''} {u.last_name or ''}".strip()}
+                                    for u in matching
+                                ],
+                                "suggestion": "Please specify the exact patient ID."
+                            })
+                        patient_id = matching[0].id
+
             if not patient_id:
-                return "Patient ID is required."
+                return json.dumps({
+                    "error": "Please specify which patient you're asking about. "
+                             "Do not substitute another patient's data for this request."
+                })
 
             db = SessionLocalPG()
 
@@ -142,14 +198,23 @@ class SpecificMedicalValueTool(BaseTool):
                 # -------------------------
                 # TABLE MAPPING
                 # -------------------------
+                # Use each table's LOCAL time column (not UTC) for both date
+                # filtering and display — using UTC caused two bugs: (1) times
+                # reported to the doctor were off by the local UTC offset
+                # (e.g. a 23:07 IST reading was shown as "17:37"), and (2)
+                # date filters like "September 1st" could miss/misinclude
+                # readings near midnight due to the UTC/local day boundary
+                # mismatch. glucose_readings names its local column
+                # "local_event_time"; every other reading table names it
+                # "actual_time" — different names, same purpose.
                 mapping = {
-                    "glucose": ("glucose_readings", "glucose_value", "event_time_utc"),
-                    "blood_pressure": ("blood_pressure_readings", "systolic", "date_time_utc"),
-                    "spo2": ("spo2_readings", "value", "date_time_utc"),
-                    "body_temperature": ("body_temperature_readings", "temperature", "date_time_utc"),
-                    "heart_rate": ("heart_rate_readings", "value", "date_time_utc"),
-                    "hrv": ("hrv_readings", "value", "date_time_utc"),
-                    "stress": ("stress_readings", "value", "date_time_utc"),
+                    "glucose": ("glucose_readings", "glucose_value", "local_event_time"),
+                    "blood_pressure": ("blood_pressure_readings", "systolic", "actual_time"),
+                    "spo2": ("spo2_readings", "value", "actual_time"),
+                    "body_temperature": ("body_temperature_readings", "temperature", "actual_time"),
+                    "heart_rate": ("heart_rate_readings", "value", "actual_time"),
+                    "hrv": ("hrv_readings", "value", "actual_time"),
+                    "stress": ("stress_readings", "value", "actual_time"),
                 }
 
                 if reading_type not in mapping:
@@ -212,7 +277,11 @@ class SpecificMedicalValueTool(BaseTool):
                 results = db.execute(text(query), params).fetchall()
 
                 if not results:
-                    return f"No {reading_type} readings found."
+                    return json.dumps({
+                        "message": f"No {reading_type} readings found for this patient in the requested period.",
+                        "patient_id": patient_id,
+                        "note": "Report exactly this — do not substitute or display another patient's data."
+                    })
 
                 # -------------------------
                 # FORMAT RESPONSE

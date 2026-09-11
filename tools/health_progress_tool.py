@@ -220,7 +220,36 @@ class HealthProgressTool(BaseTool):
                 "notice": "Either patient_id or patient_name is required."
             })
 
+        user_context = getattr(self, 'user_context', None)
+
         with DatabaseManager() as db_manager:
+            # Scope to THIS doctor's own patients first — resolves most name
+            # ambiguity automatically (e.g. multiple "Vikas Reddy" in the
+            # hospital, but only one assigned to this doctor).
+            doctor_id = user_context.get('user_id') if user_context else None
+            own_patients = db_manager.get_doctor_patients(doctor_user_id=doctor_id) if doctor_id else []
+            own_matching = [
+                p for p in own_patients
+                if patient_name.lower() in f"{p.get('patient_first_name') or ''} {p.get('patient_last_name') or ''}".lower()
+            ]
+
+            if own_matching:
+                if len(own_matching) > 1:
+                    return None, json.dumps({
+                        "status": "ambiguous_name",
+                        "notice": f"Multiple patients match '{patient_name}'. Ask the user which one.",
+                        "matching_patients": [
+                            {
+                                "id": p["patient_id"],
+                                "name": f"{p.get('patient_first_name') or ''} {p.get('patient_last_name') or ''}".strip(),
+                                "email": p.get("patient_email")
+                            } for p in own_matching
+                        ]
+                    })
+                return own_matching[0]["patient_id"], None
+
+            # Fall back to searching all patients only if none of the doctor's
+            # own patients match (e.g. covering-for-a-colleague scenarios).
             users = db_manager.get_users()
             matching_users = [
                 u for u in users
@@ -378,30 +407,43 @@ class HealthProgressTool(BaseTool):
             "metric_notice": metric_notice,
         }
 
+        RAW_FALLBACK_CAP = 20  # avoid dumping large uncapped arrays into what the LLM
+                                # has to read — an uncapped payload like this caused an
+                                # "Agent stopped due to max iterations" failure elsewhere
+                                # in this codebase (AGP chart's base64 image).
+
         if metric == "tir":
             if chart_data is not None:
                 base_payload["summary"] = self._summarize(metric, glucose_daily, data)
             else:
-                base_payload["glucose_daily"] = glucose_daily
+                base_payload["glucose_daily"] = glucose_daily[:RAW_FALLBACK_CAP]
+                if len(glucose_daily) > RAW_FALLBACK_CAP:
+                    base_payload["glucose_daily_note"] = f"Showing {RAW_FALLBACK_CAP} of {len(glucose_daily)} entries."
         elif metric == "sleep":
             if chart_data is not None:
                 base_payload["summary"] = self._summarize(metric, glucose_daily, data)
             else:
-                base_payload["sleep"] = data.get("sleep") or []
+                raw_sleep = data.get("sleep") or []
+                base_payload["sleep"] = raw_sleep[:RAW_FALLBACK_CAP]
+                if len(raw_sleep) > RAW_FALLBACK_CAP:
+                    base_payload["sleep_note"] = f"Showing {RAW_FALLBACK_CAP} of {len(raw_sleep)} entries."
         elif metric == "activity":
             if chart_data is not None:
                 base_payload["summary"] = self._summarize(metric, glucose_daily, data)
             else:
-                base_payload["activity"] = data.get("activity") or []
+                raw_activity = data.get("activity") or []
+                base_payload["activity"] = raw_activity[:RAW_FALLBACK_CAP]
+                if len(raw_activity) > RAW_FALLBACK_CAP:
+                    base_payload["activity_note"] = f"Showing {RAW_FALLBACK_CAP} of {len(raw_activity)} entries."
         else:
             base_payload.update({
-                "glucose_daily": glucose_daily,
-                "blood_pressure": data.get("bp") or [],
-                "heart_rate": data.get("hr") or [],
-                "stress": data.get("stress") or [],
-                "hrv": data.get("hrv") or [],
-                "activity": data.get("activity") or [],
-                "sleep": data.get("sleep") or [],
+                "glucose_daily": glucose_daily[:RAW_FALLBACK_CAP],
+                "blood_pressure": (data.get("bp") or [])[:RAW_FALLBACK_CAP],
+                "heart_rate": (data.get("hr") or [])[:RAW_FALLBACK_CAP],
+                "stress": (data.get("stress") or [])[:RAW_FALLBACK_CAP],
+                "hrv": (data.get("hrv") or [])[:RAW_FALLBACK_CAP],
+                "activity": (data.get("activity") or [])[:RAW_FALLBACK_CAP],
+                "sleep": (data.get("sleep") or [])[:RAW_FALLBACK_CAP],
                 "food_log_count": len(data.get("foodLogs") or []),
                 "program_summary": program_summary
             })

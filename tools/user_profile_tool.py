@@ -80,7 +80,12 @@ class UserProfileTool(BaseTool):
                 logger.info(f"Patient access: restricting query to patient ID {patient_id}")
                 
             elif not user_context or user_context.get('role_id') != 1:  # Medical staff
-                # Medical staff can query any patient information
+                # Medical staff can query any patient information.
+                # No patient specified at all → default to the logged-in staff
+                # member's own profile (mirrors "my_patients"/"my_doctor" self-
+                # referencing pattern elsewhere in this codebase).
+                if not patient_id and not patient_name and user_context:
+                    patient_id = user_context.get('user_id')
                 if not patient_id and patient_name:
                     # Try to find patient by name
                     with DatabaseManager() as db_manager:
