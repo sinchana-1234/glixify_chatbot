@@ -47,6 +47,7 @@ class QueryResponse(BaseModel):
     sessionId: Optional[str] = None
     metadata: Optional[Dict[str, Any]] = None
     user_context: Optional[Dict[str, Any]] = None
+    chart_data: Optional[Dict[str, Any]] = None  # present only when the answer includes a renderable chart
  
  
 # Voice models (robust to camelCase & snake_case)
@@ -255,11 +256,14 @@ def _transcribe_translate_with_sarvam(audio_bytes: bytes, mime: Optional[str]) -
 # =========================
 # Routes
 # =========================
- 
+
+from fastapi import Header
+
 @router.post("/query", response_model=QueryResponse)
 async def handle_query(
     request: QueryRequest,
-    current_user: UserContext = Depends(get_current_user)
+    current_user: UserContext = Depends(get_current_user),
+    authorization: Optional[str] = Header(default=None)
 ):
     """Handle medical queries with LangChain agent, session management, and role-based access control"""
     logger.info(f" Received medical query from user {current_user.user_id} (Role: {current_user.role_name}): {request.query[:100]}...")
@@ -304,7 +308,8 @@ async def handle_query(
                     'role_id': current_user.role_id,
                     'role_name': current_user.role_name,
                     'can_access_all_patients': current_user.can_access_all_patients,
-                    'authorized_patient_id': authorized_patient_id
+                    'authorized_patient_id': authorized_patient_id,
+                    'auth_token': authorization.replace("Bearer ", "").strip() if authorization else None
                 })
  
             result = await session_agent.chat(query_with_context)
@@ -320,6 +325,7 @@ async def handle_query(
                 response=result.get("message", "") if isinstance(result, dict) else str(result),
                 sessionId=session_id,
                 metadata=result_metadata,
+                chart_data=result.get("chart_data") if isinstance(result, dict) else None,
                 user_context={
                     "user_id": current_user.user_id,
                     "role_name": current_user.role_name,

@@ -17,7 +17,17 @@ logger = logging.getLogger(__name__)
 
 class SpecificMedicalValueTool(BaseTool):
     name: str = "get_specific_medical_value"
-    description: str = "Get specific medical readings (glucose, BP, etc.) using PostgreSQL."
+    description: str = (
+        "Get a SPECIFIC single medical reading (glucose, BP, SpO2, heart rate, "
+        "HRV, stress, or sleep) for one date or moment in time using PostgreSQL. "
+        "Use for: 'what was X's glucose at 3pm', 'sleep on July 5th', 'highest "
+        "reading this morning'. DO NOT use this for multi-day trends, patterns, "
+        "or anything that should be shown as a chart — use get_health_progress "
+        "instead for those (e.g. 'sleep quality this week', 'sleep trend', "
+        "'activity over the last N days', 'time in range'). If in doubt whether "
+        "the user wants one value or a trend across days, prefer "
+        "get_health_progress — it covers single values too, plus a chart."
+    )
 
     def set_user_context(self, user_context):
         object.__setattr__(self, 'user_context', user_context)

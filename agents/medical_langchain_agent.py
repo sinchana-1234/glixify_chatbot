@@ -5,6 +5,7 @@ Medical LangChain Agent for Revival Hospital System
 import logging
 from typing import List, Dict, Any
 from datetime import datetime, timedelta
+from tools.health_progress_tool import HealthProgressTool
 
 try:
     from langchain.agents import create_openai_tools_agent, AgentExecutor
@@ -112,6 +113,17 @@ class MedicalLangChainAgent:
 - You have access to all patient data as authorized medical personnel
 - You can query specific patients by name or ID, or perform multi-patient analysis
 - Always specify patient information when querying medical data
+
+🔀 **MANDATORY TOOL ROUTING — glucose/sleep/activity/BP/TIR/HR questions:**
+- If the question spans MORE THAN ONE DAY or asks for a trend/pattern/chart/summary
+  over a period (words like "trend", "this week", "quality", "pattern", "over the
+  last N days", or an explicit multi-day date range) — you MUST use
+  get_health_progress. NEVER use get_specific_medical_value for these, and NEVER
+  call get_specific_medical_value in a loop once per day to cover a range.
+- Only use get_specific_medical_value when the question is about ONE exact
+  moment or ONE single date (e.g. "glucose at 3pm", "sleep on July 5th").
+- If you are unsure which case applies, use get_health_progress — it can also
+  answer single-value questions.
 """
             
             # Patient database info - role-based visibility
@@ -128,10 +140,13 @@ class MedicalLangChainAgent:
 """
             else:  # Medical staff
                 patient_db_info = """
-🏥 **PATIENT DATABASE:**
-- Patient 111: Eswar Umamaheshwar
-- Patient 132: Rayudu Dhananjaya  
-- Patient 156: Rahul Mark
+🏥 **PATIENT ACCESS:**
+Patients are identified by numeric patient_id. Any patient_id the user provides
+(or that a tool resolves from a name) is valid — do not reject an ID on the
+grounds that it's unfamiliar. If a tool call for a given patient_id returns
+no data, say plainly that no data was found for that patient/date range —
+never claim the patient doesn't exist or isn't "in the database" based on
+your own memory of prior conversations.
 """
             
             prompt = ChatPromptTemplate.from_messages([
@@ -492,7 +507,8 @@ Remember: You provide data analysis and insights, not medical diagnosis. Always 
                     DoctorPatientMappingTool(),  # Staff can view all doctor-patient mappings
                     UserProfileTool(),  # Staff can view any patient's profile
                     DeviceTool() , # Staff can check any patient's device expiry
-                    PatientSummaryTool()
+                    PatientSummaryTool(),
+                    HealthProgressTool() # Doctor/DHA: glucose/BP/HR/stress/HRV/activity/sleep trends with chart data 
                 ]
                 
                 # Set user context on each tool
@@ -549,8 +565,21 @@ Remember: You provide data analysis and insights, not medical diagnosis. Always 
                 if response.get("output"):
                     self.conversation_history.append({"role": "assistant", "content": response["output"]})
                 
+                                # Pick up any chart data a tool stashed on itself during this run
+                # (a LangChain tool can only return text to the LLM, so tools that
+                # produce a chart use this side-channel instead). Cleared after
+                # reading so a stale chart never leaks into a later unrelated answer.
+                chart_data = None
+                for tool in self.tools:
+                    pending = getattr(tool, 'last_chart_data', None)
+                    if pending is not None:
+                        chart_data = pending
+                        object.__setattr__(tool, 'last_chart_data', None)
+                        break  # one chart per response — first one found wins
+
                 return {
                     "message": response["output"],
+                    "chart_data": chart_data,
                     "metadata": {
                         "agent_type": "Revival365AI Agent",
                         "memory_messages": len(self.conversation_history),
