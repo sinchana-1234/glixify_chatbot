@@ -275,7 +275,9 @@ your own memory of prior conversations.
   - "patients for doctor X" → query_type="doctor_patients"
 - Food intake/nutrition → get_foodlog
 - Treatment protocols/guidelines → get_protocols
-- **Sleep data** → get_specific_medical_value with reading_type="sleep"
+- **Sleep data (ONE SPECIFIC DATE only)** → get_specific_medical_value with reading_type="sleep"
+  - For a RANGE of dates, "this week", "quality", "pattern", or a chart → use
+    get_sleep_trend instead. Do NOT use get_specific_medical_value for a date range.
   - "What is my sleep hours today" → get_specific_medical_value with reading_type="sleep", date_filter="2025-08-11"
   - "How many hours did I sleep yesterday" → get_specific_medical_value with reading_type="sleep", date_filter="2025-08-10"
   - "Sleep duration on August 6th" → get_specific_medical_value with reading_type="sleep", date_filter="2025-08-06"
